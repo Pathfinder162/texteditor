@@ -1,22 +1,13 @@
-/*!
- * Hecto 编辑器 - 一个基于终端的文本编辑器
+/*
+ * Hecto Editor - 一个基于终端的文本编辑器
  * 
- * # 主要功能
+ * 主要功能：
  * - 基本的文本编辑（插入、删除、复制、粘贴）
  * - 文件操作（打开、保存）
- * - 搜索和替换（支持实时预览）
- * - 语法高亮（支持 Rust 关键字）
- * - 文本选择（支持鼠标和键盘）
+ * - 搜索和替换
+ * - 语法高亮
+ * - 选择模式
  * - 系统剪贴板集成
-
- * # 快捷键
- * - Ctrl-Q：退出
- * - Ctrl-S：保存
- * - Ctrl-F：搜索
- * - Ctrl-H：替换
- * - Ctrl-C：复制
- * - Ctrl-X：剪切
- * - Ctrl-V：粘贴
  */
 
 use std::io::{self, stdout, Write};
@@ -42,9 +33,19 @@ const VERSION: &str = "0.1.0";
 const QUIT_TIMES: u8 = 3;  // 退出确认次数，防止意外退出
 
 /// 状态消息结构体，用于显示编辑器底部的状态信息
+#[derive(Clone)]
 struct StatusMessage {
     text: String,
     time: Instant,  // 消息创建时间，用于计算显示持续时间
+    persistent: bool, // 是否持久显示
+    message_type: StatusMessageType, // 消息类型
+}
+
+#[derive(Clone, PartialEq)]
+enum StatusMessageType {
+    Normal,
+    Search,
+    Error,
 }
 
 impl StatusMessage {
@@ -52,7 +53,26 @@ impl StatusMessage {
         Self {
             time: Instant::now(),
             text: message,
+            persistent: false,
+            message_type: StatusMessageType::Normal,
         }
+    }
+
+    fn persistent(message: String, message_type: StatusMessageType) -> Self {
+        Self {
+            time: Instant::now(),
+            text: message,
+            persistent: true,
+            message_type,
+        }
+    }
+
+    fn search(message: String) -> Self {
+        Self::persistent(message, StatusMessageType::Search)
+    }
+
+    fn error(message: String) -> Self {
+        Self::persistent(message, StatusMessageType::Error)
     }
 }
 
@@ -64,30 +84,6 @@ struct Position {
 }
 
 /// 文本选择区域的状态
-/// 
-/// # 功能特点
-/// - 支持跨行选择
-/// - 支持从任意方向选择（向前或向后）
-/// - 自动规范化选择范围
-/// - 支持空选择状态
-/// 
-/// # 字段说明
-/// - `start`: 选择的起始位置
-/// - `end`: 选择的结束位置
-/// 
-/// # 使用说明
-/// - 使用 `new()` 创建新的选择，初始时起始和结束位置相同
-/// - 使用 `normalized()` 获取规范化的选择范围（确保 start 在 end 之前）
-/// - 使用 `contains()` 检查某个位置是否在选择范围内
-/// - 使用 `is_empty()` 检查是否有实际选择的内容
-/// 
-/// # 示例
-/// ```rust
-/// let mut sel = Selection::new(Position { x: 0, y: 0 });
-/// sel.end = Position { x: 10, y: 0 };  // 选择第一行的前10个字符
-/// assert!(!sel.is_empty());
-/// assert!(sel.contains(Position { x: 5, y: 0 }));
-/// ```
 #[derive(Clone, Copy)]
 struct Selection {
     start: Position,  // 选择起始位置
@@ -135,32 +131,6 @@ impl Selection {
 }
 
 /// 语法高亮的类型枚举
-/// 
-/// # 功能特点
-/// - 支持多种代码元素的高亮
-/// - 每种类型对应不同的颜色
-/// - 使用 ANSI 颜色代码
-/// - 支持 256 色模式
-/// 
-/// # 变体说明
-/// - `Normal`: 普通文本，使用默认颜色
-/// - `Number`: 数字字面量，使用红色
-/// - `String`: 字符串字面量，使用绿色
-/// - `CharLiteral`: 字符字面量，使用青色
-/// - `Comment`: 注释，使用深灰色
-/// - `PrimaryKeywords`: 主要关键字，使用黄色
-/// - `SecondaryKeywords`: 次要关键字，使用洋红色
-/// 
-/// # 使用说明
-/// - 通过 `to_color()` 方法获取对应的 ANSI 颜色代码
-/// - 在渲染时自动应用颜色
-/// - 支持实时语法高亮更新
-/// 
-/// # 示例
-/// ```rust
-/// let highlight = HighlightType::String;
-/// let color_code = highlight.to_color();  // 返回 46（绿色）
-/// ```
 #[derive(PartialEq, Clone, Copy)]
 enum HighlightType {
     Normal,
@@ -187,30 +157,6 @@ impl HighlightType {
 }
 
 /// 表示编辑器中的一行文本
-/// 
-/// # 功能特点
-/// - 支持 Unicode 字符（包括 CJK）
-/// - 实时语法高亮
-/// - 高效的文本操作（插入、删除、分割）
-/// - 智能制表符处理
-/// 
-/// # 字段说明
-/// - `string`: 行的实际内容，存储为 UTF-8 字符串
-/// - `highlighting`: 每个字符的语法高亮类型
-/// - `len`: 行的长度（按字素计算，支持组合字符）
-/// - `display_len`: 行的显示长度（考虑 CJK 等宽字符）
-/// 
-/// # 性能考虑
-/// - 使用 String 而不是 Vec<char> 以节省内存
-/// - 缓存字符计数以避免重复计算
-/// - 延迟语法高亮更新
-/// 
-/// # 示例
-/// ```rust
-/// let mut row = Row::new("let x = 42;".to_string());
-/// row.insert(8, '1');  // 变成 "let x = 142;"
-/// row.delete(8);       // 恢复为 "let x = 42;"
-/// ```
 struct Row {
     string: String,                    // 行的实际内容
     highlighting: Vec<HighlightType>,  // 每个字符的高亮类型
@@ -550,29 +496,6 @@ fn is_secondary_keyword(word: &str) -> bool {
 }
 
 /// 搜索状态，用于跟踪搜索和替换操作
-/// 
-/// # 功能特点
-/// - 支持双向搜索（向前和向后）
-/// - 记住上次匹配位置
-/// - 支持替换操作
-/// - 支持实时搜索预览
-/// 
-/// # 字段说明
-/// - `last_match`: 上一个匹配位置，用于继续搜索
-/// - `direction`: 搜索方向（1 向前，-1 向后）
-/// - `replace_text`: 替换文本，仅在替换模式下使用
-/// 
-/// # 使用说明
-/// - 使用 `Default::default()` 创建新的搜索状态
-/// - 搜索方向可以通过键盘方向键动态改变
-/// - 替换文本在确认替换前可以预览
-/// 
-/// # 示例
-/// ```rust
-/// let mut state = SearchState::default();
-/// state.direction = 1;  // 向前搜索
-/// state.replace_text = Some("new".to_string());  // 设置替换文本
-/// ```
 #[derive(Clone, Default)]
 struct SearchState {
     last_match: Option<Position>,     // 上一个匹配位置
@@ -580,38 +503,7 @@ struct SearchState {
     replace_text: Option<String>,     // 替换文本
 }
 
-/// 编辑器的主要结构体，包含所有编辑器状态和功能
-/// 
-/// # 主要职责
-/// - 管理文档内容和状态
-/// - 处理用户输入
-/// - 渲染界面
-/// - 文件操作
-/// - 搜索和替换
-/// - 文本选择
-/// 
-/// # 字段说明
-/// - `should_quit`: 是否应该退出程序
-/// - `cursor_position`: 当前光标位置
-/// - `offset`: 视图偏移量，用于滚动
-/// - `screen_rows`: 屏幕可显示的行数
-/// - `screen_cols`: 屏幕可显示的列数
-/// - `rows`: 文档内容，使用 RwLock 实现并发访问
-/// - `dirty`: 文档是否有未保存的修改
-/// - `quit_times`: 剩余的退出确认次数
-/// - `status_message`: 状态栏消息
-/// - `filename`: 当前文件名
-/// - `is_searching`: 是否处于搜索模式
-/// - `current_search`: 当前的搜索文本
-/// - `search_state`: 搜索状态
-/// - `syntax_thread`: 语法高亮线程
-/// - `save_sender`: 保存操作的发送端
-/// - `selection`: 文本选择状态
-/// - `sys_clipboard`: 系统剪贴板访问
-/// 
-/// # 线程安全
-/// 该结构体通过 Arc<RwLock<>> 实现了线程安全的文档访问，
-/// 支持多线程并发处理（如异步语法高亮和自动保存）。
+/// 编辑器的主要结构体，包含所有编辑器状态
 struct Editor {
     should_quit: bool,                    // 是否应该退出
     cursor_position: Position,            // 当前光标位置
@@ -881,6 +773,17 @@ impl Editor {
     /// 
     /// 在搜索过程中处理用户输入，支持实时搜索
     fn find_callback(&mut self, query: &str, key: KeyCode) -> bool {
+        // 如果按下Esc键，立即退出搜索模式
+        if key == KeyCode::Esc {
+            self.search_state.last_match = None;
+            self.search_state.direction = 1;
+            self.is_searching = false;
+            self.current_search = None;
+            self.status_message = StatusMessage::from(String::new());
+            self.refresh_screen().unwrap_or(());
+            return false;
+        }
+
         // 立即更新当前搜索文本，这样渲染时就能看到高亮
         self.current_search = if query.is_empty() {
             None
@@ -888,52 +791,65 @@ impl Editor {
             Some(query.to_string())
         };
 
+        // 如果查询为空，显示提示消息
+        if query.is_empty() {
+            self.status_message = StatusMessage::search("请输入搜索内容".to_string());
+            self.refresh_screen().unwrap_or(());
+            return true;
+        }
+
+        // 更新搜索状态
         match key {
             KeyCode::Enter | KeyCode::Char('n') => {
-                // 按下回车或n时，移动到下一个匹配项
-                self.search_state.direction = 1;
-                self.search_state.last_match = None;
-            }
-            KeyCode::Esc => {
-                self.search_state.last_match = None;
-                self.search_state.direction = 1;
-                self.is_searching = false;
-                self.current_search = None;
-                self.status_message = StatusMessage::from(String::new());
-                if let Err(e) = self.refresh_screen() {
-                    eprintln!("Error refreshing screen: {}", e);
-                }
-                return false;
-            }
-            KeyCode::Right | KeyCode::Down => self.search_state.direction = 1,
-            KeyCode::Left | KeyCode::Up => self.search_state.direction = -1,
-            _ => {
-                if query.is_empty() {
-                    self.search_state.last_match = None;
-                    self.search_state.direction = 1;
-                    self.status_message = StatusMessage::from(String::new());
-                    if let Err(e) = self.refresh_screen() {
-                        eprintln!("Error refreshing screen: {}", e);
-                    }
-                    return false;
-                }
+                // 显示搜索中状态
+                self.status_message = StatusMessage::search(format!("正在搜索: \"{}\"...", query));
+                self.refresh_screen().unwrap_or(());
+                stdout().flush().unwrap_or(());
 
-                self.search_state.last_match = None;
                 self.search_state.direction = 1;
+                // 如果是按下回车，从头开始搜索
+                if key == KeyCode::Enter {
+                    self.search_state.last_match = Some(Position { x: 0, y: 0 });
+                }
+            }
+            KeyCode::Right | KeyCode::Down => {
+                self.search_state.direction = 1;
+            }
+            KeyCode::Left | KeyCode::Up => {
+                self.search_state.direction = -1;
+            }
+            _ => {
+                // 其他按键时重置搜索位置
+                self.search_state.last_match = Some(Position { x: 0, y: 0 });
+                self.search_state.direction = 1;
+                return true;
             }
         }
 
-        let mut current = self.search_state.last_match.unwrap_or_else(|| {
-            self.search_state.direction = 1;
-            Position { x: 0, y: 0 }
-        });
-
-        // 获取行数，避免在循环中重复获取锁
+        // 获取当前位置
+        let mut current = self.search_state.last_match.unwrap_or_else(|| Position { x: 0, y: 0 });
+        
+        // 获取文档内容
         let rows = self.rows.read().unwrap();
         let total_rows = rows.len();
-        let mut found = false;
         
-        for _ in 0..total_rows {
+        if total_rows == 0 {
+            drop(rows);
+            self.status_message = StatusMessage::error(format!("未找到匹配项: \"{}\" (按 'Esc' 退出搜索)", query));
+            self.refresh_screen().unwrap_or(());
+            stdout().flush().unwrap_or(());
+            return true;
+        }
+
+        // 记录起始搜索位置
+        let start_y = current.y;
+        let start_x = current.x;
+        let mut found = false;
+        let mut first_search = true;
+
+        // 搜索整个文档
+        loop {
+            // 检查当前行
             let row = &rows[current.y];
             let match_index = if self.search_state.direction == 1 {
                 row.search(query, current.x)
@@ -943,6 +859,7 @@ impl Editor {
                 substring.rfind(query).map(|i| i + 1)
             };
 
+            // 如果找到匹配
             if let Some(match_index) = match_index {
                 found = true;
                 self.search_state.last_match = Some(Position {
@@ -954,7 +871,7 @@ impl Editor {
                     y: current.y,
                 };
                 
-                // 确保光标在可见区域内
+                // 调整视图确保匹配项可见
                 if current.y < self.offset.y {
                     self.offset.y = current.y;
                 } else if current.y >= self.offset.y + self.screen_rows {
@@ -969,201 +886,267 @@ impl Editor {
                 break;
             }
 
+            // 移动到下一个位置
             if self.search_state.direction == 1 {
                 current.y = (current.y + 1) % total_rows;
                 current.x = 0;
             } else {
-                current.y = if current.y == 0 {
-                    total_rows - 1
+                if current.y == 0 {
+                    current.y = total_rows - 1;
                 } else {
-                    current.y - 1
-                };
+                    current.y -= 1;
+                }
                 current.x = 0;
             }
+
+            // 检查是否已经搜索了整个文档
+            if !first_search && ((self.search_state.direction == 1 && current.y == start_y) ||
+                (self.search_state.direction == -1 && current.y == start_y && current.x >= start_x)) {
+                break;
+            }
+            first_search = false;
         }
-        
-                // 释放锁后再刷新屏幕
+
+        // 释放锁
         drop(rows);
 
-        // 更新状态消息并立即刷新屏幕
+        // 更新状态消息
         if !found {
-            self.status_message = StatusMessage::from(
-                format!("未找到匹配项: \"{}\"", query)
+            self.status_message = StatusMessage::error(
+                format!("未找到匹配项: \"{}\" (按 'Esc' 退出搜索)", query)
             );
-            // 立即刷新屏幕以显示错误消息
-            if let Err(e) = self.refresh_screen() {
-                eprintln!("Error refreshing screen: {}", e);
-            }
-            // 清除搜索状态
-            self.current_search = None;
-            self.is_searching = false;
-            self.search_state.last_match = None;
-            return false;
+            // 确保消息立即显示并保持
+            self.refresh_screen().unwrap_or(());
+            stdout().flush().unwrap_or(());
+            // 重置搜索位置，这样下次搜索会从头开始
+            self.search_state.last_match = Some(Position { x: 0, y: 0 });
+            return true;
         }
 
-        self.status_message = StatusMessage::from(
-            format!("找到 \"{}\" (按 'n' 查找下一个)", query)
-        );
+        let message = format!("找到 \"{}\" (按 'n' 查找下一个，按 'Esc' 退出)", query);
+        self.status_message = StatusMessage::search(message);
 
-        // 立即刷新屏幕以显示状态消息
-        if let Err(e) = self.refresh_screen() {
-            eprintln!("Error refreshing screen: {}", e);
-        }
+        // 刷新屏幕显示结果
+        self.refresh_screen().unwrap_or(());
+        stdout().flush().unwrap_or(());
         true
     }
 
-    /// 替换回调函数
+    /// 处理替换回调
     /// 
-    /// 在替换过程中处理用户输入，支持实时搜索和高亮显示。
-    /// 
-    /// # 参数
-    /// * `query` - 用户输入的搜索文本
-    /// * `key` - 用户按下的按键
-    /// 
-    /// # 返回值
-    /// * `true` - 继续接收用户输入
-    /// * `false` - 结束输入过程
+    /// 在替换过程中处理用户输入，支持确认替换
     fn replace_callback(&mut self, query: &str, key: KeyCode) -> bool {
+        // 如果按下Esc键，立即退出替换模式
+        if key == KeyCode::Esc {
+            self.search_state.last_match = None;
+            self.search_state.direction = 1;
+            self.is_searching = false;
+            self.current_search = None;
+            self.status_message = StatusMessage::from(String::new());
+            self.refresh_screen().unwrap_or(());
+            return false;
+        }
+
+        // 更新当前搜索文本
+        self.current_search = if query.is_empty() {
+            None
+        } else {
+            Some(query.to_string())
+        };
+
         match key {
             KeyCode::Enter => {
                 if query.is_empty() {
-                    return false;
+                    self.status_message = StatusMessage::error("请输入要搜索的内容".to_string());
+                    self.refresh_screen().unwrap_or(());
+                    stdout().flush().unwrap_or(());
+                    return true;
                 }
-                self.current_search = Some(query.to_string());
-                false
-            }
-            KeyCode::Esc => {
-                self.current_search = None;
-                self.search_state.last_match = None;
-                false
-            }
-            _ => {
-                // 更新搜索文本，实时显示高亮
-                self.current_search = if query.is_empty() {
-                    None
-                } else {
-                    Some(query.to_string())
-                };
+
+                // 当按下回车时，先查找匹配项
+                self.search_state.direction = 1;
+                let mut current = self.search_state.last_match.unwrap_or_else(|| {
+                    Position { x: 0, y: 0 }
+                });
+
+                // 获取行数，避免在循环中重复获取锁
+                let rows = self.rows.read().unwrap();
+                let total_rows = rows.len();
+                let mut found = false;
                 
-                // 查找并高亮显示匹配项
-                if !query.is_empty() {
-                    let rows = self.rows.read().unwrap();
-                    for y in 0..rows.len() {
-                        if let Some(x) = rows[y].string.find(query) {
-                            self.search_state.last_match = Some(Position { x, y });
-                            break;
+                for _ in 0..total_rows {
+                    let row = &rows[current.y];
+                    let match_index = if self.search_state.direction == 1 {
+                        row.search(query, current.x)
+                    } else {
+                        let start = if current.x > 0 { current.x - 1 } else { 0 };
+                        let substring: String = row.string[..].graphemes(true).take(start).collect();
+                        substring.rfind(query).map(|i| i + 1)
+                    };
+
+                    if let Some(match_index) = match_index {
+                        found = true;
+                        self.search_state.last_match = Some(Position {
+                            x: match_index,
+                            y: current.y,
+                        });
+                        self.cursor_position = Position {
+                            x: match_index,
+                            y: current.y,
+                        };
+                        
+                        // 确保光标在可见区域内
+                        if current.y < self.offset.y {
+                            self.offset.y = current.y;
+                        } else if current.y >= self.offset.y + self.screen_rows {
+                            self.offset.y = current.y - self.screen_rows + 1;
                         }
+                        if match_index < self.offset.x {
+                            self.offset.x = match_index;
+                        } else if match_index >= self.offset.x + self.screen_cols {
+                            self.offset.x = match_index - self.screen_cols + 1;
+                        }
+                        
+                        break;
+                    }
+
+                    if self.search_state.direction == 1 {
+                        current.y = (current.y + 1) % total_rows;
+                        current.x = 0;
+                    } else {
+                        current.y = if current.y == 0 {
+                            total_rows - 1
+                        } else {
+                            current.y - 1
+                        };
+                        current.x = 0;
                     }
                 }
                 
-                // 刷新屏幕以显示高亮
-                if let Err(e) = self.refresh_screen() {
-                    eprintln!("Error refreshing screen: {}", e);
+                // 释放锁后再刷新屏幕
+                drop(rows);
+
+                // 更新状态消息并刷新屏幕
+                if !found {
+                    self.status_message = StatusMessage::error(
+                        format!("未找到匹配项: \"{}\" (按 'Esc' 退出)", query)
+                    );
+                    // 立即刷新屏幕以显示错误消息
+                    self.refresh_screen().unwrap_or(());
+                    stdout().flush().unwrap_or(());
+                    return true;
                 }
-                true
+
+                // 提示输入替换文本
+                if let Ok(Some(replace_text)) = self.prompt::<fn(&mut Editor, &str, KeyCode) -> bool>("Replace with: ", None) {
+                    self.search_state.replace_text = Some(replace_text);
+                    self.replace_current_match();
+                    // 查找下一个匹配项
+                    self.search_state.last_match = None;
+                    self.search_state.direction = 1;
+                    return true;
+                }
+                false
+            }
+            KeyCode::Char('n') => {
+                // 查找下一个匹配项
+                self.search_state.last_match = None;
+                self.search_state.direction = 1;
+                return true;
+            }
+            KeyCode::Right | KeyCode::Down => {
+                self.search_state.direction = 1;
+                return true;
+            }
+            KeyCode::Left | KeyCode::Up => {
+                self.search_state.direction = -1;
+                return true;
+            }
+            _ => {
+                if query.is_empty() {
+                    self.search_state.last_match = None;
+                    self.search_state.direction = 1;
+                    self.status_message = StatusMessage::from(String::new());
+                    self.refresh_screen().unwrap_or(());
+                    return false;
+                }
+
+                self.search_state.last_match = None;
+                self.search_state.direction = 1;
+                return true;
+            }
+        }
+    }
+
+    /// 替换当前匹配的文本
+    fn replace_current_match(&mut self) {
+        if let (Some(query), Some(replace_text)) = (&self.current_search, &self.search_state.replace_text) {
+            if let Some(position) = self.search_state.last_match {
+                let mut rows = self.rows.write().unwrap();
+                if position.y < rows.len() {
+                    let row = &mut rows[position.y];
+                    let mut result = String::new();
+                    let mut length = 0;
+                    let mut replaced = false;
+                    
+                    let mut current_pos = 0;
+                    for (index, grapheme) in row.string[..].graphemes(true).enumerate() {
+                        if index == position.x && !replaced {
+                            // 跳过原始文本的长度
+                            current_pos += query.len();
+                            // 添加替换文本
+                            result.push_str(replace_text);
+                            length += replace_text.chars().count();
+                            replaced = true;
+                        } else if current_pos < row.string.len() {
+                            result.push_str(grapheme);
+                            length += 1;
+                            current_pos += 1;
+                        }
+                    }
+                    
+                    row.string = result;
+                    row.len = length;
+                    row.update_syntax();
+                    self.dirty = true;
+                    
+                    // 更新光标位置到替换文本之后
+                    self.cursor_position.x = position.x + replace_text.len();
+                    
+                    // 更新状态消息
+                    self.status_message = StatusMessage::from(
+                        format!("已替换文本。按 'n' 查找下一个，按 'Enter' 替换，按 'Esc' 退出")
+                    );
+                }
             }
         }
     }
 
     /// 启动替换操作
-    /// 
-    /// 执行文本替换的完整流程：
-    /// 1. 获取要搜索的文本（实时显示匹配项）
-    /// 2. 获取要替换成的文本
-    /// 3. 执行替换操作
-    /// 
-    /// # 错误
-    /// 如果发生 I/O 错误，将返回该错误
     fn replace(&mut self) -> io::Result<()> {
         let saved_cursor_position = self.cursor_position;
         let saved_offset = self.offset;
 
-        // 第一步：获取搜索文本
         self.is_searching = true;
-        match self.prompt::<fn(&mut Editor, &str, KeyCode) -> bool>("搜索要替换的文本: ", Some(Editor::replace_callback))? {
-            Some(search_text) if !search_text.is_empty() => {
-                // 第二步：获取替换文本
-                match self.prompt::<fn(&mut Editor, &str, KeyCode) -> bool>("替换为: ", None)? {
-                    Some(replace_text) => {
-                        self.search_state.replace_text = Some(replace_text);
-                        self.replace_current_match();
-                    }
-                    None => {
-                        self.status_message = StatusMessage::from("替换已取消".to_string());
-                    }
-                }
+        if let Some(_query) = self.prompt("Search (for replace): ", Some(&Self::replace_callback))? {
+            self.is_searching = false;
+            self.current_search = None;
+            self.refresh_screen()?;
+            // 只有在有匹配项被替换时才显示"替换完成"的消息
+            if self.search_state.last_match.is_some() {
+                self.status_message = StatusMessage::from(format!(
+                    "替换完成 (按 Ctrl-H 继续替换)"
+                ));
             }
-            _ => {
-                self.status_message = StatusMessage::from("搜索已取消".to_string());
-            }
+        } else {
+            self.cursor_position = saved_cursor_position;
+            self.offset = saved_offset;
+            self.is_searching = false;
+            self.current_search = None;
+            self.search_state.last_match = None;
+            self.refresh_screen()?;
         }
-
-        // 恢复状态
-        self.is_searching = false;
-        self.cursor_position = saved_cursor_position;
-        self.offset = saved_offset;
-        self.current_search = None;
-        self.search_state.last_match = None;
-        self.search_state.replace_text = None;
-        self.refresh_screen()?;
-        
         Ok(())
-    }
-
-    /// 替换所有匹配的文本
-    /// 
-    /// 在整个文档中查找并替换所有匹配项：
-    /// - 支持多行替换
-    /// - 保持语法高亮
-    /// - 更新文档状态
-    /// - 显示替换结果统计
-    fn replace_current_match(&mut self) {
-        if let (Some(query), Some(replace_text)) = (&self.current_search, &self.search_state.replace_text) {
-            if query.is_empty() {
-                self.status_message = StatusMessage::from("搜索文本不能为空".to_string());
-                return;
-            }
-
-            let mut total_replacements = 0;
-            let mut rows = self.rows.write().unwrap();
-            
-            // 遍历所有行
-            for y in 0..rows.len() {
-                let row = &mut rows[y];
-                if !row.string.contains(query) {
-                    continue;
-                }
-
-                let new_string = row.string.replace(query, replace_text);
-                if new_string != row.string {
-                    row.string = new_string;
-                    row.len = row.string.graphemes(true).count();
-                    row.display_len = UnicodeWidthStr::width(&row.string[..]);
-                    row.update_syntax();
-                    
-                    // 计算这一行中替换的次数
-                    let mut count = 0;
-                    let mut start = 0;
-                    while let Some(index) = row.string[start..].find(replace_text) {
-                        count += 1;
-                        start += index + replace_text.len();
-                    }
-                    total_replacements += count;
-                    self.dirty = true;
-                }
-            }
-            
-            // 更新状态消息
-            if total_replacements > 0 {
-                self.status_message = StatusMessage::from(
-                    format!("已替换 {} 处匹配项", total_replacements)
-                );
-            } else {
-                self.status_message = StatusMessage::from(
-                    "未找到匹配项".to_string()
-                );
-            }
-        }
     }
 
     /// 开始文本选择
@@ -1374,32 +1357,149 @@ impl Editor {
         let saved_offset = self.offset;
 
         self.is_searching = true;
-        if let Some(_query) = self.prompt("Search: ", Some(Editor::find_callback))? {
-            self.is_searching = false;
-            self.current_search = None;
+        if let Some(_) = self.prompt("Search: ", Some(&Self::find_callback))? {
+            // 如果用户按了Enter，保持搜索模式
+            // 刷新屏幕以显示搜索高亮
             self.refresh_screen()?;
+            // 状态消息已经在 find_callback 中设置
         } else {
+            // 如果用户按了ESC，恢复原来的位置
             self.cursor_position = saved_cursor_position;
             self.offset = saved_offset;
             self.is_searching = false;
             self.current_search = None;
             self.search_state.last_match = None;
+            self.status_message = StatusMessage::from(String::new());
+            // 刷新屏幕以清除搜索高亮
             self.refresh_screen()?;
         }
         Ok(())
     }
 
+    /// 移动光标
+    fn move_cursor(&mut self, key: KeyCode) {
+        let Position { mut x, mut y } = self.cursor_position;
+        let rows = self.rows.read().unwrap();
+        let height = rows.len();
+
+        match key {
+            KeyCode::Up => {
+                if y > 0 {
+                    y -= 1;
+                    // 调整 x 坐标以适应新行的字符宽度
+                    if let Some(row) = rows.get(y) {
+                        let mut current_width = 0;
+                        let mut new_x = 0;
+                        let target_width = if let Some(current_row) = rows.get(self.cursor_position.y) {
+                            current_row.string[..]
+                                .graphemes(true)
+                                .take(x)
+                                .map(|g| UnicodeWidthStr::width(g))
+                                .sum::<usize>()
+                        } else {
+                            0
+                        };
+
+                        for (i, grapheme) in row.string[..].graphemes(true).enumerate() {
+                            let width = UnicodeWidthStr::width(grapheme);
+                            if current_width > target_width {
+                                break;
+                            }
+                            current_width += width;
+                            new_x = i;
+                        }
+                        x = new_x;
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if y < height {
+                    y += 1;
+                    // 调整 x 坐标以适应新行的字符宽度
+                    if let Some(row) = rows.get(y) {
+                        let mut current_width = 0;
+                        let mut new_x = 0;
+                        let target_width = if let Some(current_row) = rows.get(self.cursor_position.y) {
+                            current_row.string[..]
+                                .graphemes(true)
+                                .take(x)
+                                .map(|g| UnicodeWidthStr::width(g))
+                                .sum::<usize>()
+                        } else {
+                            0
+                        };
+
+                        for (i, grapheme) in row.string[..].graphemes(true).enumerate() {
+                            let width = UnicodeWidthStr::width(grapheme);
+                            if current_width > target_width {
+                                break;
+                            }
+                            current_width += width;
+                            new_x = i;
+                        }
+                        x = new_x;
+                    }
+                }
+            }
+            KeyCode::Left => {
+                if x > 0 {
+                    x -= 1;
+                } else if y > 0 {
+                    y -= 1;
+                    if let Some(row) = rows.get(y) {
+                        x = row.len;
+                    } else {
+                        x = 0;
+                    }
+                }
+            }
+            KeyCode::Right => {
+                if let Some(row) = rows.get(y) {
+                    if x < row.len {
+                        x += 1;
+                    } else if y < height {
+                        y += 1;
+                        x = 0;
+                    }
+                }
+            }
+            KeyCode::PageUp => {
+                y = if y > self.screen_rows {
+                    y - self.screen_rows
+                } else {
+                    0
+                }
+            }
+            KeyCode::PageDown => {
+                y = if y.saturating_add(self.screen_rows) < height {
+                    y + self.screen_rows
+                } else {
+                    height
+                }
+            }
+            KeyCode::Home => x = 0,
+            KeyCode::End => {
+                if let Some(row) = rows.get(y) {
+                    x = row.len;
+                }
+            }
+            _ => (),
+        }
+
+        // 确保 x 不超过当前行的长度
+        let width = if let Some(row) = rows.get(y) {
+            row.len
+        } else {
+            0
+        };
+        if x > width {
+            x = width;
+        }
+
+        self.cursor_position = Position { x, y }
+    }
+
     /// 处理按键事件
-    /// 
-    /// 处理所有的键盘输入，包括：
-    /// - 编辑操作（插入、删除、复制、粘贴）
-    /// - 光标移动
-    /// - 文本选择
-    /// - 文件操作
-    /// - 搜索和替换
-    /// 
-    /// # 错误
-    /// 如果发生 I/O 错误，将返回该错误
     fn process_keypress(&mut self) -> io::Result<()> {
         if event::poll(Duration::from_millis(500))? {
             match event::read()? {
@@ -1408,7 +1508,7 @@ impl Editor {
                         match (key_event.code, key_event.modifiers) {
                             (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
                                 if self.dirty && self.quit_times > 0 {
-                                    self.status_message = StatusMessage::from(format!(
+                                    self.status_message = StatusMessage::error(format!(
                                         "WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.",
                                         self.quit_times
                                     ));
@@ -1539,17 +1639,6 @@ impl Editor {
                             self.cursor_position = Position { x, y };
                             self.update_selection();
                         }
-                        event::MouseEventKind::ScrollUp => {
-                            if self.offset.y > 0 {
-                                self.offset.y = self.offset.y.saturating_sub(3);
-                            }
-                        }
-                        event::MouseEventKind::ScrollDown => {
-                            let rows_lock = self.rows.read().unwrap();
-                            if self.offset.y < rows_lock.len() {
-                                self.offset.y = self.offset.y.saturating_add(3);
-                            }
-                        }
                         _ => (),
                     }
                 }
@@ -1560,11 +1649,6 @@ impl Editor {
     }
 
     /// 处理屏幕滚动
-    /// 
-    /// 根据光标位置自动调整视图：
-    /// - 确保光标始终可见
-    /// - 处理水平和垂直滚动
-    /// - 支持 CJK 等宽字符
     fn scroll(&mut self) {
         let Position { x, y } = self.cursor_position;
         let width = self.screen_cols;
@@ -1598,126 +1682,19 @@ impl Editor {
         }
     }
 
-    /// 移动光标
-    /// 
-    /// 处理各种光标移动情况：
-    /// - 上下左右移动
-    /// - 处理行首行尾
-    /// - 处理页面上下翻页
-    /// - 支持 CJK 等宽字符
-    /// - 保持选择状态（如果有）
-    /// 
-    /// # 参数
-    /// * `key` - 移动方向对应的按键
-    fn move_cursor(&mut self, key: KeyCode) {
-        let Position { mut x, mut y } = self.cursor_position;
-        let rows = self.rows.read().unwrap();
-        let height = rows.len();
-
-        // 获取当前行的字符宽度信息
-        let mut current_row_widths = Vec::new();
-        let mut current_row_len = 0;
-        if let Some(row) = rows.get(y) {
-            for grapheme in row.string[..].graphemes(true) {
-                current_row_widths.push(UnicodeWidthStr::width(grapheme));
-                current_row_len += 1;
-            }
-        }
-
-        match key {
-            KeyCode::Up => {
-                if y > 0 {
-                    y -= 1;
-                    // 调整 x 坐标以适应新行的长度和字符宽度
-                    if let Some(row) = rows.get(y) {
-                        let mut total_width = 0;
-                        let mut new_x = 0;
-                        for (i, grapheme) in row.string[..].graphemes(true).enumerate() {
-                            let char_width = UnicodeWidthStr::width(grapheme);
-                            if total_width > x {
-                                break;
-                            }
-                            total_width += char_width;
-                            new_x = i;
-                        }
-                        x = new_x;
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if y < height {
-                    y += 1;
-                    // 调整 x 坐标以适应新行的长度和字符宽度
-                    if let Some(row) = rows.get(y) {
-                        let mut total_width = 0;
-                        let mut new_x = 0;
-                        for (i, grapheme) in row.string[..].graphemes(true).enumerate() {
-                            let char_width = UnicodeWidthStr::width(grapheme);
-                            if total_width > x {
-                                break;
-                            }
-                            total_width += char_width;
-                            new_x = i;
-                        }
-                        x = new_x;
-                    }
-                }
-            }
-            KeyCode::Left => {
-                if x > 0 {
-                    x -= 1;
-                } else if y > 0 {
-                    y -= 1;
-                    if let Some(row) = rows.get(y) {
-                        x = row.len;
-                    } else {
-                        x = 0;
-                    }
-                }
-            }
-            KeyCode::Right => {
-                if x < current_row_len {
-                    x += 1;
-                } else if y < height {
-                    y += 1;
-                    x = 0;
-                }
-            }
-            KeyCode::PageUp => {
-                y = if y > self.screen_rows {
-                    y - self.screen_rows
-                } else {
-                    0
-                }
-            }
-            KeyCode::PageDown => {
-                y = if y.saturating_add(self.screen_rows) < height {
-                    y + self.screen_rows
-                } else {
-                    height
-                }
-            }
-            KeyCode::Home => x = 0,
-            KeyCode::End => x = current_row_len,
-            _ => (),
-        }
-
-        // 确保 x 不超过当前行的长度
-        let width = if let Some(row) = rows.get(y) {
-            row.len
-        } else {
-            0
-        };
-        if x > width {
-            x = width;
-        }
-
-        self.cursor_position = Position { x, y }
-    }
-
     /// 刷新屏幕显示
     fn refresh_screen(&mut self) -> io::Result<()> {
         self.scroll();
+
+        // 在搜索模式下，确保状态消息不会被清除
+        if !self.is_searching {
+            // 只有在非搜索模式下才检查消息超时
+            if self.status_message.message_type == StatusMessageType::Normal && 
+               !self.status_message.persistent && 
+               self.status_message.time.elapsed() > Duration::from_secs(5) {
+                self.status_message = StatusMessage::from(String::new());
+            }
+        }
         
         queue!(
             stdout(),
@@ -1733,8 +1710,17 @@ impl Editor {
         let Position { x, y } = self.cursor_position;
         let Position { x: offset_x, y: offset_y } = self.offset;
         
-        // 调整光标位置计算
-        let cursor_x = x.saturating_sub(offset_x);
+        let display_x = if let Some(row) = self.rows.read().unwrap().get(y) {
+            row.string[..]
+                .graphemes(true)
+                .take(x)
+                .map(|g| UnicodeWidthStr::width(g))
+                .sum::<usize>()
+        } else {
+            x
+        };
+        
+        let cursor_x = display_x.saturating_sub(offset_x);
         let cursor_y = y.saturating_sub(offset_y);
         
         queue!(
@@ -1802,50 +1788,62 @@ impl Editor {
             cursor::MoveTo(0, (self.screen_rows + 1) as u16),
             terminal::Clear(ClearType::CurrentLine)
         )?;
-            
-        // 总是显示状态消息，不管是否在搜索模式
+        
         let mut text = self.status_message.text.clone();
         text.truncate(self.screen_cols);
-        queue!(stdout(), Print(&text))?;
+
+        // 根据消息类型设置不同的显示样式
+        match self.status_message.message_type {
+            StatusMessageType::Error => {
+                queue!(
+                    stdout(),
+                    style::SetForegroundColor(style::Color::Red),
+                    style::SetAttribute(style::Attribute::Bold),
+                    Print(&text),
+                    style::ResetColor,
+                    style::SetAttribute(style::Attribute::Reset)
+                )?;
+            }
+            StatusMessageType::Search => {
+                queue!(
+                    stdout(),
+                    style::SetForegroundColor(style::Color::Yellow),
+                    style::SetAttribute(style::Attribute::Bold),
+                    Print(&text),
+                    style::ResetColor,
+                    style::SetAttribute(style::Attribute::Reset)
+                )?;
+            }
+            StatusMessageType::Normal => {
+                queue!(stdout(), Print(&text))?;
+            }
+        }
         
         Ok(())
     }
 
     /// 渲染单行文本
-    /// 
-    /// 处理行的渲染，包括：
-    /// - 语法高亮
-    /// - 搜索匹配高亮
-    /// - 选择区域高亮
-    /// - CJK 字符宽度处理
-    /// - 制表符展开
-    /// 
-    /// # 参数
-    /// * `row` - 要渲染的行
-    /// 
-    /// # 返回值
-    /// 返回包含 ANSI 转义序列的渲染后的字符串
     fn render_row(&self, row: &Row) -> String {
         let mut result = String::new();
-        let mut current_highlighting = HighlightType::Normal;
-        let mut is_in_selection = false;
-        let mut is_in_search_highlight = false;
         let mut current_display_width = 0;
-        let mut skip_chars = 0;
-        let mut _rendered_chars = 0;  // 已添加下划线前缀
+        let mut skip_chars = self.offset.x;
 
-        // 获取选择范围（如果有）
+        let mut current_highlighting = HighlightType::Normal;
+        let mut is_in_search_highlight = false;
+        let mut is_in_selection = false;
+
+        // 获取选择范围
         let selection_range = self.selection.map(|s| s.normalized());
 
-        // 获取搜索高亮范围
+        // 首先收集所有搜索匹配的位置
         let mut search_highlights = Vec::new();
-        if let Some(query) = &self.current_search {
-            let mut index = 0;
-            while let Some(found_index) = row.string[index..].find(query) {
-                let start = index + found_index;
-                let end = start + query.len();
-                search_highlights.push((start, end));
-                index = found_index + 1;
+        if let Some(ref search_text) = self.current_search {
+            if !search_text.is_empty() {
+                let mut index = 0;
+                while let Some(found_index) = row.search(search_text, index) {
+                    search_highlights.push((found_index, found_index + search_text.len()));
+                    index = found_index + 1;
+                }
             }
         }
 
@@ -1926,7 +1924,6 @@ impl Editor {
                 result.push_str(grapheme);
                 current_display_width += char_width;
             }
-            _rendered_chars += 1;
         }
 
         result.push_str("\x1b[0m");
@@ -1934,15 +1931,6 @@ impl Editor {
     }
 
     /// 绘制所有行
-    /// 
-    /// 渲染编辑器的主要内容区域：
-    /// - 显示文件内容
-    /// - 处理视图偏移
-    /// - 显示欢迎信息（空文件时）
-    /// - 处理行末和屏幕边界
-    /// 
-    /// # 错误
-    /// 如果发生 I/O 错误，将返回该错误
     fn draw_rows(&mut self) -> io::Result<()> {
         let height = self.screen_rows;
         let rows = self.rows.read().unwrap();
