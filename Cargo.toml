@@ -1,0 +1,11 @@
+[package]
+name = "hecto"
+version = "0.1.0"
+edition = "2021"
+authors = ["xzk"]
+
+[dependencies]
+crossterm = "0.27.0"
+unicode-segmentation = "1.10.1"
+clipboard = "0.5.0"
+unicode-width = "0.1.11"
